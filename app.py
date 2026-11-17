@@ -112,15 +112,24 @@ class App:
         title = str(picture.get("title") or "Untitled")
         media = str(picture.get("media_type") or "image")
         url = str(picture.get("hdurl") or picture.get("url") or "")
+        explanation = self._short(str(picture.get("explanation") or ""))
+        # Pippa's reply is built from this sentence, so it carries the whole
+        # answer: the title, what it shows and where to see it. Every part of
+        # it is also in `data`.
+        narrative = f"NASA's Astronomy Picture of the Day for {self._pretty(day)} is “{title}”."
+        if explanation:
+            narrative += f" {explanation}"
+        if url:
+            narrative += f" {'Video' if media == 'video' else 'See it here'}: {url}"
         return Result(
             data={
                 "title": title,
                 "date": str(picture.get("date") or day.isoformat()),
-                "explanation": self._short(str(picture.get("explanation") or "")),
+                "explanation": explanation,
                 "media_type": media,
                 "url": url,
             },
-            narrative=f"NASA's picture for {self._pretty(day)} is “{title}”.",
+            narrative=narrative,
         )
 
     def _fetch(self, day: date, key: str) -> dict:

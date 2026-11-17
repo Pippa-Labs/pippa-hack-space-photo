@@ -77,7 +77,11 @@ def test_todays_picture(nasa):
     assert result.data["date"] == "2026-11-17"
     assert result.data["url"].endswith("pillars_hd.jpg")
     assert result.data["explanation"] == "Stars are forming in these columns of gas. They are light-years tall."
+    # Pippa's reply comes from the narrative: it must hold the whole answer.
     assert "Tuesday 17 November 2026" in result.narrative
+    assert "The Pillars of Creation" in result.narrative
+    assert "They are light-years tall." in result.narrative
+    assert result.narrative.endswith("See it here: https://apod.nasa.gov/apod/image/pillars_hd.jpg")
 
 
 def test_the_key_goes_only_in_an_unredirected_header(nasa):
