@@ -121,9 +121,16 @@ def test_days_it_cannot_show(nasa, text, error):
         call({"date": text})
 
 
-@pytest.mark.parametrize("code, error", [(403, KeyRefused), (429, NasaBusy), (503, NasaBusy)])
-def test_nasa_refusals_never_carry_the_key(monkeypatch, code, error):
+@pytest.mark.parametrize("code, error, attempts", [
+    (403, KeyRefused, 1),   # the key is wrong: asking again cannot help
+    (429, NasaBusy, 1),     # the key's hourly limit: asking again spends more of it
+    (503, NasaBusy, 3),     # NASA stumbled: try again, then give up plainly
+])
+def test_nasa_refusals_never_carry_the_key(monkeypatch, code, error, attempts):
+    tries = []
+
     def refuse(request, timeout):
+        tries.append(timeout)
         raise app_module.urllib.error.HTTPError(request.full_url, code, "no", {}, None)
 
     monkeypatch.setattr(app_module.urllib.request, "urlopen", refuse)
@@ -131,3 +138,38 @@ def test_nasa_refusals_never_carry_the_key(monkeypatch, code, error):
     with pytest.raises(error) as caught:
         call({})
     assert FAKE_KEY not in str(caught.value)
+    assert len(tries) == attempts
+
+
+def test_a_hanging_request_is_tried_again(nasa, monkeypatch):
+    """NASA sometimes hangs; the next request usually answers at once."""
+    real = app_module.urllib.request.urlopen
+    tries = []
+
+    def hang_once(request, timeout):
+        tries.append(timeout)
+        if len(tries) == 1:
+            raise TimeoutError("timed out")
+        return real(request, timeout)
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", hang_once)
+    assert call({}).data["title"] == "The Pillars of Creation"
+    assert len(tries) == 2
+    assert all(t <= app_module.ATTEMPT_SECONDS for t in tries)
+
+
+def test_every_attempt_fits_inside_pippas_20_seconds(monkeypatch):
+    clock = [0.0]
+    tries = []
+
+    def hang(request, timeout):
+        tries.append(timeout)
+        clock[0] += timeout
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", hang)
+    monkeypatch.setenv("NASA_API_KEY", FAKE_KEY)
+    with pytest.raises(NasaBusy):
+        call({})
+    assert sum(tries) <= app_module.TOTAL_SECONDS < 20

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,7 +41,11 @@ APOD_URL = "https://api.nasa.gov/planetary/apod"
 #: The first Astronomy Picture of the Day.
 FIRST_DAY = date(1995, 6, 16)
 USER_AGENT = "pippa-agent-app-space-photo/0.1 (https://github.com/Pippa-Labs)"
-TIMEOUT_SECONDS = 8
+#: Up to three tries of at most 6 seconds, 17 seconds in all: under the 20
+#: seconds Pippa gives a call, with room to answer.
+ATTEMPTS = 3
+ATTEMPT_SECONDS = 6
+TOTAL_SECONDS = 17
 
 
 class KeyMissing(AgentAppError):
@@ -119,25 +124,43 @@ class App:
         )
 
     def _fetch(self, day: date, key: str) -> dict:
-        """One request to NASA. The key travels in a header, never in the URL,
-        and `add_unredirected_header` keeps it from following a redirect to
-        another host. Never put the key, or NASA's error text, in a message."""
-        query = urllib.parse.urlencode({"date": day.isoformat(), "thumbs": "true"})
-        request = urllib.request.Request(f"{APOD_URL}?{query}", headers={"User-Agent": USER_AGENT})
-        request.add_unredirected_header("X-Api-Key", key)
-        try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                raise KeyRefused(f"NASA answered {exc.code}") from None
-            if exc.code == 429 or exc.code >= 500:
-                raise NasaBusy(f"NASA answered {exc.code}") from None
-            raise CannotReadDate(f"NASA answered {exc.code} for {day.isoformat()}") from None
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise NasaBusy(f"could not reach NASA: {type(exc).__name__}") from None
-        except ValueError:
-            raise NasaBusy("NASA sent something that is not JSON") from None
+        """Ask NASA, trying again when it hangs or stumbles.
+
+        NASA's APOD service either answers in a few seconds or hangs for half a
+        minute and more, at random (measured: about one request in three), so
+        a short wait and a fresh request beat one long wait. Every attempt
+        fits inside Pippa's 20 seconds for a call.
+
+        The key travels in a header, never in the URL, and
+        `add_unredirected_header` keeps it from following a redirect to another
+        host. Never put the key, or NASA's error text, in a message.
+        """
+        query = urllib.parse.urlencode({"date": day.isoformat()})
+        deadline = time.monotonic() + TOTAL_SECONDS
+        problem = "no attempt made"
+        for _attempt in range(ATTEMPTS):
+            left = deadline - time.monotonic()
+            if left < 1:
+                break
+            request = urllib.request.Request(f"{APOD_URL}?{query}", headers={"User-Agent": USER_AGENT})
+            request.add_unredirected_header("X-Api-Key", key)
+            try:
+                with urllib.request.urlopen(request, timeout=min(ATTEMPT_SECONDS, left)) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    raise KeyRefused(f"NASA answered {exc.code}") from None
+                if exc.code == 429:
+                    # The key's own hourly limit: trying again only spends more of it.
+                    raise NasaBusy("NASA answered 429") from None
+                if exc.code < 500:
+                    raise CannotReadDate(f"NASA answered {exc.code} for {day.isoformat()}") from None
+                problem = f"NASA answered {exc.code}"
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                problem = f"could not reach NASA: {type(exc).__name__}"
+            except ValueError:
+                problem = "NASA sent something that is not JSON"
+        raise NasaBusy(problem)
 
     @staticmethod
     def _today(call: Call) -> date:
