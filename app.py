@@ -1,4 +1,13 @@
-"""Space Photo: NASA's Astronomy Picture of the Day, for today or a date you name.
+"""Space Photo: NASA's latest photo of the whole Earth from space.
+
+The photos come from EPIC, the camera on the DSCOVR satellite, which
+photographs the sunlit side of the Earth several times a day from about
+1.5 million km away. NASA publishes each day's photos 1 to 3 days later.
+
+(This app first used NASA's Astronomy Picture of the Day API. In November 2026
+the APOD website moved to science.nasa.gov and the API began answering with the
+new site's title and the NASA logo instead of the picture, or hanging. EPIC is
+served by the same api.nasa.gov with the same key.)
 
 The shape never changes, whatever your app does:
 
@@ -16,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -35,17 +45,25 @@ from pippa_agentapp_sdk import (
 
 MANIFEST_PATH = Path(__file__).with_name("manifest.yaml")
 
-#: The one address the key is ever sent to. Written here in full: the question's
-#: words only go into the query's values, so nobody can choose where the key goes.
-APOD_URL = "https://api.nasa.gov/planetary/apod"
-#: The first Astronomy Picture of the Day.
-FIRST_DAY = date(1995, 6, 16)
-USER_AGENT = "pippa-agent-app-space-photo/0.1 (https://github.com/Pippa-Labs)"
+#: The one place the key is ever sent. Written here in full: the question's
+#: words only become a date in the path, so nobody can choose where the key goes.
+EPIC_API = "https://api.nasa.gov/EPIC/api/natural"
+#: Where people can open a photo: NASA's public archive, which needs no key, so
+#: the link we hand out never carries one.
+EPIC_ARCHIVE = "https://epic.gsfc.nasa.gov/archive/natural"
+#: EPIC's first photos.
+FIRST_DAY = date(2015, 6, 13)
+USER_AGENT = "pippa-agent-app-space-photo/0.2 (https://github.com/Pippa-Labs)"
 #: Up to three tries of at most 6 seconds, 17 seconds in all: under the 20
 #: seconds Pippa gives a call, with room to answer.
 ATTEMPTS = 3
 ATTEMPT_SECONDS = 6
 TOTAL_SECONDS = 17
+
+#: What a real EPIC record looks like. Anything else is refused rather than
+#: shown: a wrong link is worse than a plain "try again".
+_IMAGE_NAME = re.compile(r"epic_[0-9a-z]+_\d{14}")
+_TAKEN_AT = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 
 
 class KeyMissing(AgentAppError):
@@ -63,7 +81,7 @@ class KeyRefused(AgentAppError):
 
 
 class NasaBusy(AgentAppError):
-    """NASA's rate limit for this key, or NASA itself, is not answering."""
+    """NASA is not answering, or answered with something that is not a photo."""
 
     user_message = "NASA isn't answering just now. Try again in a little while."
     retryable = True
@@ -75,12 +93,17 @@ class CannotReadDate(AgentAppError):
 
 
 class OutOfRange(AgentAppError):
-    user_message = "NASA has a picture for every day from 16 June 1995 to today; pick a day in that range."
+    user_message = "NASA's EPIC camera has photos from 13 June 2015 to a few days ago; pick a day in that range."
+    retryable = False
+
+
+class NoPhotoThatDay(AgentAppError):
+    user_message = "NASA has no Earth photo for that day yet. Photos appear 1 to 3 days later; ask for an earlier day, or just for the latest."
     retryable = False
 
 
 class App:
-    """Ask NASA for one day's Astronomy Picture of the Day."""
+    """Ask NASA for a day's photos of the Earth, and show one."""
 
     def __init__(self) -> None:
         self._manifest = validate_manifest(load_manifest_file(MANIFEST_PATH))
@@ -104,58 +127,65 @@ class App:
 
         today = self._today(call)
         text = (call.inputs.get("date") or "").strip()
-        day = self._parse(text, today) if text else today
-        if not FIRST_DAY <= day <= today:
-            raise OutOfRange(f"{day.isoformat()} is outside {FIRST_DAY.isoformat()}..{today.isoformat()}")
+        day = None
+        if text and text.lower() not in ("today", "latest", "now"):
+            day = self._parse(text, today)
+            if not FIRST_DAY <= day <= today:
+                raise OutOfRange(f"{day.isoformat()} is outside {FIRST_DAY.isoformat()}..{today.isoformat()}")
 
-        picture = self._fetch(day, key)
-        title = str(picture.get("title") or "Untitled")
-        media = str(picture.get("media_type") or "image")
-        url = str(picture.get("hdurl") or picture.get("url") or "")
-        explanation = self._short(str(picture.get("explanation") or ""))
-        # Pippa's reply is built from this sentence, so it carries the whole
-        # answer: the title, what it shows and where to see it. Every part of
-        # it is also in `data`.
-        narrative = f"NASA's Astronomy Picture of the Day for {self._pretty(day)} is “{title}”."
-        if explanation:
-            narrative += f" {explanation}"
-        if url:
-            narrative += f" {'Video' if media == 'video' else 'See it here'}: {url}"
+        url = EPIC_API if day is None else f"{EPIC_API}/date/{day.isoformat()}"
+        photos = [p for p in self._fetch(url, key) if self._is_photo(p)]
+        if not photos:
+            if day is None:
+                raise NasaBusy("NASA answered with no usable photo")
+            raise NoPhotoThatDay(f"no EPIC photo for {day.isoformat()}")
+
+        photo = photos[len(photos) // 2]  # mid-day of that set: the most of the sunlit side
+        taken = datetime.strptime(photo["date"], "%Y-%m-%d %H:%M:%S")
+        link = f"{EPIC_ARCHIVE}/{taken:%Y/%m/%d}/jpg/{photo['image']}.jpg"
+        centre = photo.get("centroid_coordinates") or {}
+        where = self._where(centre)
+        when = f"{self._pretty(taken.date())} at {taken:%H:%M} UTC"
+        title = f"The Earth from space, {self._pretty(taken.date())}"
+        explanation = (
+            f"Taken by NASA's EPIC camera on the DSCOVR satellite, about 1.5 million km away, on {when}"
+            + (f", centred over {where}." if where else ".")
+        )
+        narrative = f"Here is NASA's photo of the whole Earth from space, taken {when}"
+        narrative += f", centred over {where}." if where else "."
+        narrative += (" It comes from the EPIC camera on the DSCOVR satellite, about 1.5 million km away."
+                      f" See it here: {link}")
+        if day is None:
+            narrative += " (NASA publishes these 1 to 3 days after they are taken, so this is the latest.)"
         return Result(
             data={
                 "title": title,
-                "date": str(picture.get("date") or day.isoformat()),
+                "date": taken.date().isoformat(),
                 "explanation": explanation,
-                "media_type": media,
-                "url": url,
+                "media_type": "image",
+                "url": link,
             },
             narrative=narrative,
         )
 
-    def _fetch(self, day: date, key: str) -> dict:
+    def _fetch(self, url: str, key: str) -> list:
         """Ask NASA, trying again when it hangs or stumbles.
-
-        NASA's APOD service either answers in a few seconds or hangs for half a
-        minute and more, at random (measured: about one request in three), so
-        a short wait and a fresh request beat one long wait. Every attempt
-        fits inside Pippa's 20 seconds for a call.
 
         The key travels in a header, never in the URL, and
         `add_unredirected_header` keeps it from following a redirect to another
         host. Never put the key, or NASA's error text, in a message.
         """
-        query = urllib.parse.urlencode({"date": day.isoformat()})
         deadline = time.monotonic() + TOTAL_SECONDS
         problem = "no attempt made"
         for _attempt in range(ATTEMPTS):
             left = deadline - time.monotonic()
             if left < 1:
                 break
-            request = urllib.request.Request(f"{APOD_URL}?{query}", headers={"User-Agent": USER_AGENT})
+            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             request.add_unredirected_header("X-Api-Key", key)
             try:
                 with urllib.request.urlopen(request, timeout=min(ATTEMPT_SECONDS, left)) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    body = json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 if exc.code in (401, 403):
                     raise KeyRefused(f"NASA answered {exc.code}") from None
@@ -163,13 +193,37 @@ class App:
                     # The key's own hourly limit: trying again only spends more of it.
                     raise NasaBusy("NASA answered 429") from None
                 if exc.code < 500:
-                    raise CannotReadDate(f"NASA answered {exc.code} for {day.isoformat()}") from None
+                    raise NasaBusy(f"NASA answered {exc.code}") from None
                 problem = f"NASA answered {exc.code}"
+                continue
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 problem = f"could not reach NASA: {type(exc).__name__}"
+                continue
             except ValueError:
                 problem = "NASA sent something that is not JSON"
+                continue
+            if isinstance(body, list):
+                return body
+            problem = "NASA sent something that is not a list of photos"
         raise NasaBusy(problem)
+
+    @staticmethod
+    def _is_photo(record) -> bool:
+        return (
+            isinstance(record, dict)
+            and isinstance(record.get("image"), str) and bool(_IMAGE_NAME.fullmatch(record["image"]))
+            and isinstance(record.get("date"), str) and bool(_TAKEN_AT.fullmatch(record["date"]))
+        )
+
+    @staticmethod
+    def _where(centre: dict) -> str:
+        try:
+            lat, lon = float(centre["lat"]), float(centre["lon"])
+        except (KeyError, TypeError, ValueError):
+            return ""
+        ns = "N" if lat >= 0 else "S"
+        ew = "E" if lon >= 0 else "W"
+        return f"{abs(lat):.0f}°{ns}, {abs(lon):.0f}°{ew}"
 
     @staticmethod
     def _today(call: Call) -> date:
@@ -182,13 +236,14 @@ class App:
 
     @staticmethod
     def _parse(text: str, today: date) -> date:
-        """`today`, `yesterday`, `YYYY-MM-DD`, `4 July 2025`, `July 4 2025`, `4 July`."""
+        """`yesterday`, `YYYY-MM-DD`, `4 July 2025`, `July 4 2025`, `4 July`, `N days ago`."""
         cleaned = " ".join(text.replace(",", " ").split())
         lowered = cleaned.lower()
-        if lowered == "today":
-            return today
         if lowered == "yesterday":
             return today - timedelta(days=1)
+        match = re.fullmatch(r"(\d{1,4}) days? ago", lowered)
+        if match:
+            return today - timedelta(days=int(match.group(1)))
         for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d %B %Y", "%B %d %Y", "%d %b %Y", "%b %d %Y"):
             try:
                 return datetime.strptime(cleaned, fmt).date()
@@ -203,12 +258,6 @@ class App:
             candidate = parsed.replace(year=today.year)
             return candidate if candidate <= today else candidate.replace(year=today.year - 1)
         raise CannotReadDate(f"could not parse {text!r} as a date")
-
-    @staticmethod
-    def _short(text: str, sentences: int = 2) -> str:
-        parts = [p.strip() for p in text.replace("\n", " ").split(". ") if p.strip()]
-        short = ". ".join(parts[:sentences])
-        return short if short.endswith(".") or not short else short + "."
 
     @staticmethod
     def _pretty(day: date) -> str:

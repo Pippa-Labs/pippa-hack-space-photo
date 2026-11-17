@@ -75,8 +75,9 @@ app:
   # badge Pippa shows is parsed from "[via <name> <version> by <author name>]"
   # (the author name is `app_author_name` above) and splits on the first "by".
   summary: >-
-    Shows NASA's Astronomy Picture of the Day for today or a date you name:
-    its title, a short explanation and a link to the picture.
+    Shows NASA's latest photo of the whole Earth from space, from the EPIC
+    camera on the DSCOVR satellite, or the one for a day you name, with a link
+    to the picture.
 agent_types:
   - personal
 
@@ -98,13 +99,13 @@ agent_types:
 
 outcomes:
   - id: apod.show
-    summary: Show NASA's Astronomy Picture of the Day for a date
+    summary: Show NASA's photo of the whole Earth from space for a day
     example_phrases:
-      - astronomy picture of the day
       - space photo of the day
-      - show me today's nasa picture
-      - what was nasa's space picture on
-      - nasa image of the day
+      - show me the earth from space
+      - nasa photo of earth today
+      - what did the earth look like from space on
+      - latest picture of earth from space
     inputs:
       - name: date
         type: string
@@ -112,7 +113,7 @@ outcomes:
         description: >-
           The day the person asked about, as they wrote it, for example
           "yesterday", "4 July 2025" or "2025-07-04". If the message names no
-          day, return an empty string: the app then uses today.
+          day, return an empty string: the app then shows the latest photo.
       - name: timezone
         type: timezone
         required: false
@@ -120,19 +121,19 @@ outcomes:
     output:
       - name: title
         type: string
-        description: The picture's title.
+        description: A title for the photo, naming the day it was taken.
       - name: date
         type: string
-        description: The day of the picture, as YYYY-MM-DD.
+        description: The day the photo was taken, as YYYY-MM-DD.
       - name: explanation
         type: string
-        description: NASA's explanation of the picture, shortened to about two sentences.
+        description: Where and when the photo was taken, in one sentence.
       - name: media_type
         type: string
-        description: '"image" or "video".'
+        description: 'Always "image".'
       - name: url
         type: string
-        description: A link to the picture (or the video).
+        description: A link to the photo in NASA's public archive.
 
 # ── API keys your app needs (this example needs none) ────────────────────────
 #
@@ -166,5 +167,5 @@ outcomes:
 # Pippa (Apps > Created by me > Space Photo > Keys); on your computer, in .env.
 app_secrets:
   - name: NASA_API_KEY
-    description: "NASA API key from api.nasa.gov, used to fetch the Astronomy Picture of the Day"
+    description: "NASA API key from api.nasa.gov, used to fetch the EPIC photos of the Earth"
     required: true
