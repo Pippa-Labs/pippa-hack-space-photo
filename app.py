@@ -1,4 +1,4 @@
-"""Your app. Replace this with whatever you are building.
+"""Space Photo: NASA's Astronomy Picture of the Day, for today or a date you name.
 
 The shape never changes, whatever your app does:
 
@@ -6,32 +6,19 @@ The shape never changes, whatever your app does:
         manifest  -> the parsed manifest.yaml sitting next to this file
         handle(call) -> Result
 
-`handle` is called once per request and must return a `Result` whose `data`
-matches the `output` your manifest declares for that outcome — exactly: every
-declared field present, nothing extra, right types. The runtime checks it and
-refuses anything that does not match, which is deliberate. An app that can
-return surprise fields is an app Pippa cannot describe to a user before they
-install it.
-
-Three things worth knowing before you start:
-
-**You get the inputs, and nothing about who asked.** No user id, no account,
-no conversation. `call.inputs` is what Pippa extracted from the message;
-besides it, `call.context` carries only the time, an id for your logs, and
-whether the person picked your app by name. This is on purpose: your app
-cannot leak what it was never given.
-
-**You keep nothing.** A fresh copy of this class is built for every call and
-thrown away afterwards. Writing to a file or a global will appear to work and
-then silently stop, because the next call may be on a different machine.
-
-**Errors are part of the design.** Raise `AgentAppError` with a `user_message`
-when you cannot answer. That message is the one a user may see; everything
-else — the exception type, the traceback — stays in the logs.
+This app needs an API key, NASA_API_KEY (declared under `app_secrets` in
+manifest.yaml). Its value is never in this repository: Pippa keeps it and puts
+it in `os.environ` for each call. On your computer it comes from `.env`, which
+git never commits. docs/API_APPS.md, "Using API keys", explains it all.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -47,21 +34,50 @@ from pippa_agentapp_sdk import (
 
 MANIFEST_PATH = Path(__file__).with_name("manifest.yaml")
 
+#: The one address the key is ever sent to. Written here in full: the question's
+#: words only go into the query's values, so nobody can choose where the key goes.
+APOD_URL = "https://api.nasa.gov/planetary/apod"
+#: The first Astronomy Picture of the Day.
+FIRST_DAY = date(1995, 6, 16)
+USER_AGENT = "pippa-agent-app-space-photo/0.1 (https://github.com/Pippa-Labs)"
+TIMEOUT_SECONDS = 8
+
+
+class KeyMissing(AgentAppError):
+    """The app's NASA key is not set, so it cannot ask NASA."""
+
+    user_message = "Space Photo isn't set up yet: its builder still has to add its NASA key."
+    retryable = False
+
+
+class KeyRefused(AgentAppError):
+    """NASA refused the key (wrong, revoked, or not yet active)."""
+
+    user_message = "Space Photo can't reach NASA right now: its key was refused."
+    retryable = False
+
+
+class NasaBusy(AgentAppError):
+    """NASA's rate limit for this key, or NASA itself, is not answering."""
+
+    user_message = "NASA isn't answering just now. Try again in a little while."
+    retryable = True
+
 
 class CannotReadDate(AgentAppError):
-    """Raised when the message did not contain a date we can work with."""
+    user_message = "I could not work out which day you meant."
+    retryable = False
 
-    # What a user may be shown. Write it as a sentence, not an error code.
-    user_message = "I could not work out which date you meant."
+
+class OutOfRange(AgentAppError):
+    user_message = "NASA has a picture for every day from 16 June 1995 to today; pick a day in that range."
     retryable = False
 
 
 class App:
-    """A small, complete example: count the days until a date."""
+    """Ask NASA for one day's Astronomy Picture of the Day."""
 
     def __init__(self) -> None:
-        # Validated at construction, so an app whose manifest is wrong fails
-        # immediately and loudly rather than on some later call.
         self._manifest = validate_manifest(load_manifest_file(MANIFEST_PATH))
 
     @property
@@ -69,58 +85,63 @@ class App:
         return self._manifest
 
     def handle(self, call: Call) -> Result:
-        """One request in, one Result out.
-
-        `call.outcome_id` says which of your manifest's outcomes was asked
-        for. With one outcome you can ignore it; with several, branch on it.
-        """
-        if call.outcome_id != "days.until":
+        if call.outcome_id != "apod.show":
             raise AgentAppError(f"this app cannot do {call.outcome_id!r}")
 
-        text = (call.inputs.get("date") or "").strip()
-        if not text:
-            # The manifest tells the extractor to send an empty string rather
-            # than guess, so this is the ordinary "they did not say" path.
-            #
-            # A missing or unreadable date (here, and in `_parse` below) is
-            # the only thing this app refuses for, which is why it never reads
-            # `call.context.explicit`, True when the person picked the app
-            # with @. That refusal is right whoever chose the app; the test
-            # that says so is in test_app.py.
-            raise CannotReadDate("no date in the message")
+        # Here, not at the top of the file: Pippa puts the key in os.environ
+        # for each call, and it is not there while the module is imported.
+        key = os.environ.get("NASA_API_KEY", "")
+        if not key:
+            raise KeyMissing(
+                "NASA_API_KEY is not set: put it in .env on your computer, "
+                "or under Keys on the app's card in Pippa"
+            )
 
-        # `call.context.now` is the current time, supplied by the runtime
-        # rather than read from the clock. That is what makes an app testable:
-        # a test can say what "now" is.
         today = self._today(call)
-        target = self._parse(text, today)
-        difference = (target - today).days
+        text = (call.inputs.get("date") or "").strip()
+        day = self._parse(text, today) if text else today
+        if not FIRST_DAY <= day <= today:
+            raise OutOfRange(f"{day.isoformat()} is outside {FIRST_DAY.isoformat()}..{today.isoformat()}")
 
+        picture = self._fetch(day, key)
+        title = str(picture.get("title") or "Untitled")
+        media = str(picture.get("media_type") or "image")
+        url = str(picture.get("hdurl") or picture.get("url") or "")
         return Result(
             data={
-                "days": abs(difference),
-                "target_date": target.isoformat(),
-                "weekday": target.strftime("%A"),
-                "already_passed": difference < 0,
+                "title": title,
+                "date": str(picture.get("date") or day.isoformat()),
+                "explanation": self._short(str(picture.get("explanation") or "")),
+                "media_type": media,
+                "url": url,
             },
-            # Optional. One plain sentence Pippa may use when it writes its
-            # reply. Say what you found, not what you did.
-            narrative=self._sentence(target, difference),
+            narrative=f"NASA's picture for {self._pretty(day)} is “{title}”.",
         )
+
+    def _fetch(self, day: date, key: str) -> dict:
+        """One request to NASA. The key travels in a header, never in the URL,
+        and `add_unredirected_header` keeps it from following a redirect to
+        another host. Never put the key, or NASA's error text, in a message."""
+        query = urllib.parse.urlencode({"date": day.isoformat(), "thumbs": "true"})
+        request = urllib.request.Request(f"{APOD_URL}?{query}", headers={"User-Agent": USER_AGENT})
+        request.add_unredirected_header("X-Api-Key", key)
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise KeyRefused(f"NASA answered {exc.code}") from None
+            if exc.code == 429 or exc.code >= 500:
+                raise NasaBusy(f"NASA answered {exc.code}") from None
+            raise CannotReadDate(f"NASA answered {exc.code} for {day.isoformat()}") from None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise NasaBusy(f"could not reach NASA: {type(exc).__name__}") from None
+        except ValueError:
+            raise NasaBusy("NASA sent something that is not JSON") from None
 
     @staticmethod
     def _today(call: Call) -> date:
-        """The user's today, not the server's.
-
-        A server in UTC and a user in Auckland disagree about what day it is
-        for twelve hours out of every twenty-four, and "how many days until"
-        is exactly the question that notices.
-        """
-        # No try/except around ZoneInfo, and that is the point: the manifest
-        # declares this input as `type: timezone`, so the runtime has already
-        # rejected anything that is not a real IANA zone before your code
-        # runs. Declaring the right type is cheaper than validating by hand,
-        # and the user gets a better error.
+        """The person's today (the manifest's `timezone` input), not the server's."""
         zone = call.inputs.get("timezone")
         moment: datetime = call.context.now
         if zone:
@@ -129,50 +150,35 @@ class App:
 
     @staticmethod
     def _parse(text: str, today: date) -> date:
-        """Turn what the user wrote into a date.
-
-        Deliberately small — real date parsing is its own project. Handles
-        `YYYY-MM-DD`, `25 December`, `December 25` and a bare day number.
-        """
-        cleaned = text.replace(",", " ").strip()
-
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        """`today`, `yesterday`, `YYYY-MM-DD`, `4 July 2025`, `July 4 2025`, `4 July`."""
+        cleaned = " ".join(text.replace(",", " ").split())
+        lowered = cleaned.lower()
+        if lowered == "today":
+            return today
+        if lowered == "yesterday":
+            return today - timedelta(days=1)
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d %B %Y", "%B %d %Y", "%d %b %Y", "%b %d %Y"):
             try:
                 return datetime.strptime(cleaned, fmt).date()
             except ValueError:
                 continue
-
         for fmt in ("%d %B", "%B %d", "%d %b", "%b %d"):
             try:
                 parsed = datetime.strptime(cleaned, fmt).date()
             except ValueError:
                 continue
-            # A bare day and month has no year. "25 December" asked in
-            # February means this year; asked in December means this year too,
-            # until it has passed, and then it means next year.
+            # No year: the most recent such day that is not in the future.
             candidate = parsed.replace(year=today.year)
-            if candidate < today:
-                candidate = candidate.replace(year=today.year + 1)
-            return candidate
-
-        if cleaned.lower() == "tomorrow":
-            return today + timedelta(days=1)
-
+            return candidate if candidate <= today else candidate.replace(year=today.year - 1)
         raise CannotReadDate(f"could not parse {text!r} as a date")
 
     @staticmethod
-    def _sentence(target: date, difference: int) -> str:
-        # Built by hand rather than with `%-d`, which is a GNU extension: it
-        # raises ValueError on Windows, where half of you are developing, and
-        # the failure would only show up at the last line of a working app.
-        pretty = (
-            f"{target.strftime('%A')} {target.day} "
-            f"{target.strftime('%B')} {target.year}"
-        )
-        if difference == 0:
-            return f"That is today, {pretty}."
-        if difference < 0:
-            return f"{pretty} was {abs(difference)} days ago."
-        if difference == 1:
-            return f"{pretty} is tomorrow."
-        return f"There are {difference} days until {pretty}."
+    def _short(text: str, sentences: int = 2) -> str:
+        parts = [p.strip() for p in text.replace("\n", " ").split(". ") if p.strip()]
+        short = ". ".join(parts[:sentences])
+        return short if short.endswith(".") or not short else short + "."
+
+    @staticmethod
+    def _pretty(day: date) -> str:
+        # By hand, not `%-d`: that is a GNU extension and fails on Windows.
+        return f"{day.strftime('%A')} {day.day} {day.strftime('%B')} {day.year}"

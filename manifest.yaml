@@ -39,7 +39,7 @@ persistence: none
 # It does not decide who owns the app, and nothing in this file does. Pippa
 # Labs created this repository for your Pippa account, so every app published
 # from it is yours. docs/REVIEW_AND_SHARING.md is the whole story.
-app_author_name: ""
+app_author_name: "Orbit Lab"
 
 app:
   # Filled in for you. A new repository replaces this placeholder within a
@@ -55,7 +55,7 @@ app:
   # Hyphens are not valid in an app id anywhere. `git remote get-url origin`
   # tells you the repository name.
   id: hack.space_photo
-  name: Days Until
+  name: Space Photo
   # The version you are pushing. Pippa keeps a copy of the code of every
   # version, so pushing a new version never changes an older one: the approved
   # version keeps working for everyone while you try the next.
@@ -75,10 +75,8 @@ app:
   # badge Pippa shows is parsed from "[via <name> <version> by <author name>]"
   # (the author name is `app_author_name` above) and splits on the first "by".
   summary: >-
-    Works out how many days there are until a date you name, and says which
-    day of the week it falls on.
-
-# Who can install it. `personal` means a person's own Pippa.
+    Shows NASA's Astronomy Picture of the Day for today or a date you name:
+    its title, a short explanation and a link to the picture.
 agent_types:
   - personal
 
@@ -99,50 +97,42 @@ agent_types:
 #     "my calendar" belong to Pippa Diary; a phrase using them will lose.
 
 outcomes:
-  - id: days.until
-    summary: Count the days between now and a date, and name the weekday
+  - id: apod.show
+    summary: Show NASA's Astronomy Picture of the Day for a date
     example_phrases:
-      - how many days until
-      - how long until
-      - how many sleeps until
-      - days left until
-      - what day of the week is
-    # What Pippa extracts from the user's message and hands you. A model reads
-    # `description` to do that extraction, so write it as an instruction to
-    # whoever is filling the field in.
+      - astronomy picture of the day
+      - space photo of the day
+      - show me today's NASA picture
+      - what was NASA's space picture on
+      - nasa image of the day
     inputs:
-      # `required: false`, although the app is useless without a date, and
-      # that is deliberate. A missing REQUIRED input is refused inside the
-      # runtime before your code runs, and the user is shown a message that
-      # blames your app for a question they asked perfectly reasonably. An
-      # optional input simply arrives absent, your code notices, and you
-      # raise an error that says something true. Keep `required: true` for
-      # inputs the extractor can always supply.
       - name: date
         type: string
         required: false
         description: >-
-          The target date, as the user wrote it — for example "25 December",
-          "2027-01-01" or "next Friday". If the message does not name a date,
-          return an empty string rather than guessing.
+          The day the person asked about, as they wrote it, for example
+          "yesterday", "4 July 2025" or "2025-07-04". If the message names no
+          day, return an empty string: the app then uses today.
       - name: timezone
         type: timezone
         required: false
-        description: The user's time zone, so "today" means their today.
-    # What you promise to return. Returning anything else is refused; omitting
-    # a declared field is refused too. Keep it small and specific.
+        description: The person's time zone, so "today" means their today.
     output:
-      - name: days
-        type: integer
-        description: How many whole days until the date. Negative if it has passed.
-      - name: target_date
+      - name: title
         type: string
-        description: The date you actually used, as YYYY-MM-DD.
-      - name: weekday
+        description: The picture's title.
+      - name: date
         type: string
-        description: The day of the week the date falls on.
-      - name: already_passed
-        type: boolean
+        description: The day of the picture, as YYYY-MM-DD.
+      - name: explanation
+        type: string
+        description: NASA's explanation of the picture, shortened to about two sentences.
+      - name: media_type
+        type: string
+        description: '"image" or "video".'
+      - name: url
+        type: string
+        description: A link to the picture (or the video).
 
 # ── API keys your app needs (this example needs none) ────────────────────────
 #
@@ -171,3 +161,10 @@ outcomes:
 # Your app CAN call the public internet (see docs/HOW_PIPPA_APPS_WORK.md).
 # This repository is public, so a key in any file here is a key anyone can
 # copy: keys only ever go in Pippa and in .env.
+
+# This app's own API key: the name only, never the value. Set the value in
+# Pippa (Apps > Created by me > Space Photo > Keys); on your computer, in .env.
+app_secrets:
+  - name: NASA_API_KEY
+    description: "NASA API key from api.nasa.gov, used to fetch the Astronomy Picture of the Day"
+    required: true
